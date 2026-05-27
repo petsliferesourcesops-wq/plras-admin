@@ -1,5 +1,5 @@
 const WORKER_VERSION =
-  "plras-consumer-v2.0";
+  "plras-consumer-v2.1-stable";
 
 export default {
 
@@ -11,45 +11,121 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type,x-api-key"
     };
 
-    // =========================
-    // RATE LIMIT
-    // =========================
-    const ip =
-      req.headers.get("CF-Connecting-IP") ||
-      "unknown";
+// =========================
+// RATE LIMIT
+// =========================
+if (
+  env.RATE_LIMIT_KV &&
+  typeof env.RATE_LIMIT_KV.get === "function"
+) {
+  const ip =
+    req.headers.get(
+      "CF-Connecting-IP"
+    ) || "unknown";
 
-    const key =
-      `ratelimit:${ip}`;
+  const key =
+    `ratelimit:${ip}`;
 
-    const current =
-      Number(
-        await env.RATE_LIMIT_KV.get(key) || 0
-      );
-
-    if (current > 100) {
-
-      return new Response(
-        "Rate limited",
-        {
-          status: 429,
-          headers: corsHeaders
-        }
-      );
-    }
-
-    await env.RATE_LIMIT_KV.put(
-      key,
-      String(current + 1),
-      {
-        expirationTtl: 60
-      }
+  const current =
+    Number(
+      await env.RATE_LIMIT_KV.get(key) || 0
     );
 
-    if (req.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+  if (current > 100) {
+
+    return new Response(
+      "Rate limited",
+      {
+        status: 429,
+        headers: corsHeaders
+      }
+    );
+  }
+
+  await env.RATE_LIMIT_KV.put(
+    key,
+    String(current + 1),
+    {
+      expirationTtl: 60
     }
+  );
+}
 
     const url = new URL(req.url);
+
+// =========================
+// LOGIN PAGE
+// =========================
+if (
+  url.pathname === "/login" &&
+  req.method === "GET"
+) {
+
+return new Response(
+`
+<!DOCTYPE html>
+<html>
+<body style="font-family:Arial;padding:40px">
+
+<h2>PLRAS Admin Login</h2>
+
+<input
+id="pw"
+type="password"
+placeholder="Password"
+/>
+
+<button onclick="login()">
+Login
+</button>
+
+<script>
+
+async function login(){
+
+const password =
+document.getElementById("pw").value;
+
+const res =
+await fetch(
+"/login",
+{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({
+password
+})
+}
+);
+
+if(res.ok){
+
+location.href="/admin";
+
+}else{
+
+alert("Wrong password");
+
+}
+
+}
+
+</script>
+
+</body>
+</html>
+`,
+{
+headers:{
+"Content-Type":"text/html",
+...corsHeaders
+}
+}
+);
+
+}
 
     // =========================
     // ADMIN COOKIE AUTH
@@ -58,16 +134,18 @@ export default {
       req.headers.get("Cookie") || "";
 
     const authenticated =
-      cookie.includes(
+cookie
+  .split(";")
+  .map(c => c.trim())
+  .includes(
         `plras_admin=${env.ADMIN_PASSWORD}`
       );
 
     // Allow login endpoint
     const publicPaths = [
-      "/login",
-      "/review",
-      "/favicon.ico"
-    ];
+  "/login",
+  "/favicon.ico"
+];
 
     // Block all admin routes
     if (
@@ -148,31 +226,31 @@ export default {
     }
 
     // =========================
-    // REVIEW AUTH
-    // =========================
-    if (
-      url.pathname === "/review"
-    ) {
+// REVIEW AUTH
+// =========================
+if (
+  url.pathname === "/review"
+) {
 
-      const secret =
-        url.searchParams.get(
-          "secret"
-        );
+  const secret =
+    url.searchParams.get(
+      "secret"
+    );
 
-      if (
-        secret !==
-        env.REVIEW_SECRET
-      ) {
+  if (
+    !authenticated &&
+    secret !== env.REVIEW_SECRET
+  ) {
 
-        return new Response(
-          "Unauthorized",
-          {
-            status: 401,
-            headers: corsHeaders
-          }
-        );
+    return new Response(
+      "Unauthorized",
+      {
+        status: 401,
+        headers: corsHeaders
       }
-    }
+    );
+  }
+}
 
     // =========================
     // APPLICATIONS AUTH
@@ -699,73 +777,64 @@ export default {
           }
         }
 
-        // =========================
-        // APPROVAL EMAILS
-        // =========================
-        const approvers =
-          getApprovers(
-            env,
-            role
-          );
+     // =========================
+// APPROVAL EMAILS
+// =========================
+const approvers =
+  getApprovers(
+    env,
+    role
+  );
 
-        for (
-          const approverEmail of approvers
-        ) {
+for (
+  const approverEmail of approvers
+) {
 
-          try {
+  try {
 
-            const base =
-              env.APP_BASE_URL;
+    const summary =
+      JSON.stringify(
+        data.details || [],
+        null,
+        2
+      ).substring(0,3000);
 
-            const approve =
-              `${base}/review?id=${submissionId}&action=approved&role=${role}&secret=${env.REVIEW_SECRET}`;
+    await sendApproverEmail(
+      env,
+      approverEmail,
+      {
+        submissionId,
 
-            const reject =
-              `${base}/review?id=${submissionId}&action=rejected&role=${role}&secret=${env.REVIEW_SECRET}`;
+        full_name:
+          applicant?.full_name ||
+          data?.full_name ||
+          "Unknown",
 
-            await sendEmailDirect(
-              env,
-              approverEmail,
+        email:
+          applicant?.email ||
+          "No email",
 
-              `New ${role} Application`,
+        role,
 
-              `
-              <p>
-              <b>${role}</b>
-              application submitted
-              </p>
+        summary
+      }
+    );
 
-              <p>
-              ID: ${submissionId}
-              </p>
+  } catch (e) {
 
-              <p>
-              <a href="${approve}">
-              ✅ Approve
-              </a>
-              </p>
+    console.error(
+      "❌ APPROVER EMAIL FAIL",
+      e
+    );
 
-              <p>
-              <a href="${reject}">
-              ❌ Reject
-              </a>
-              </p>
-              `
-            );
+    await sendDiscordAlert(
+      env,
+      `❌ APPROVER EMAIL FAIL\n${e}`
+    );
 
-          } catch (e) {
+  }
 
-            console.error(
-              "❌ APPROVER EMAIL FAIL",
-              e
-            );
-
-            await sendDiscordAlert(
-              env,
-              `❌ APPROVER EMAIL FAIL\n${e}`
-            );
-          }
-        }
+}
 
         // =========================
         // SHEETS
@@ -819,7 +888,7 @@ export default {
             score: scoreValue,
 
             worker_version:
-              "plras-consumer-v2.0"
+  "plras-consumer-v2.1-stable"
           }
         );
 
@@ -1034,6 +1103,79 @@ function getApprovers(
     .map(e => e.trim())
     .filter(Boolean);
 }
+// =========================
+// APPROVER EMAIL
+// =========================
+async function sendApproverEmail(
+  env,
+  recipient,
+  data
+){
+
+  const approve =
+    `${env.APP_BASE_URL}/review?id=${data.submissionId}&action=approved&role=${data.role}&secret=${env.REVIEW_SECRET}`;
+
+  const reject =
+    `${env.APP_BASE_URL}/review?id=${data.submissionId}&action=rejected&role=${data.role}&secret=${env.REVIEW_SECRET}`;
+
+  const html = `
+
+<h2>
+New application received
+</h2>
+
+<p>
+<b>Submission ID:</b><br>
+${data.submissionId}
+</p>
+
+<p>
+<b>Name:</b><br>
+${data.full_name}
+</p>
+
+<p>
+<b>Role:</b><br>
+${data.role}
+</p>
+
+<p>
+<b>Email:</b><br>
+${data.email}
+</p>
+
+<p>
+<b>Summary:</b>
+</p>
+
+<pre>
+${data.summary}
+</pre>
+
+<br>
+
+<p>
+<a href="${approve}">
+✅ Approve
+</a>
+</p>
+
+<p>
+<a href="${reject}">
+❌ Reject
+</a>
+</p>
+
+`;
+
+  return await sendEmailDirect(
+    env,
+    recipient,
+    `PLRAS Review - ${data.submissionId}`,
+    html
+  );
+
+}
 
 // =========================
 // SHEETS
@@ -1160,11 +1302,37 @@ async function uploadToDropbox(
   }
 
   // =========================
-  // SHARE LINK
   // =========================
-  const share =
+// SHARE LINK
+// =========================
+const share =
+  await fetch(
+    "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings",
+    {
+      method: "POST",
+      headers: {
+        Authorization:
+          `Bearer ${accessToken}`,
+        "Content-Type":
+          "application/json"
+      },
+      body: JSON.stringify({
+        path
+      })
+    }
+  );
+
+const link =
+  await share.json();
+
+if (
+  link.error?.[".tag"] ===
+  "shared_link_already_exists"
+) {
+
+  const existing =
     await fetch(
-      "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings",
+      "https://api.dropboxapi.com/2/sharing/list_shared_links",
       {
         method: "POST",
         headers: {
@@ -1174,20 +1342,30 @@ async function uploadToDropbox(
             "application/json"
         },
         body: JSON.stringify({
-          path
+          path,
+          direct_only: true
         })
       }
     );
 
-  const link =
-    await share.json();
+  const existingData =
+    await existing.json();
 
   return (
-    link.url?.replace(
-      "?dl=0",
-      "?raw=1"
-    ) || null
+    existingData.links?.[0]?.url
+      ?.replace(
+        "?dl=0",
+        "?raw=1"
+      ) || null
   );
+}
+
+return (
+  link.url?.replace(
+    "?dl=0",
+    "?raw=1"
+  ) || null
+);
 }
 
 // =========================
@@ -1370,11 +1548,27 @@ async function writeFirestore(
   env,
   token,
   path,
-  data
+  data,
+  updateMask = []
 ) {
 
-  const url =
+  let url =
     `https://firestore.googleapis.com/v1/projects/${env.GCP_PROJECT_ID}/databases/(default)/documents/${path}`;
+
+  if (
+    updateMask.length
+  ) {
+
+    const params =
+      updateMask
+        .map(
+          field =>
+            `updateMask.fieldPaths=${encodeURIComponent(field)}`
+        )
+        .join("&");
+
+    url += `?${params}`;
+  }
 
   const res =
     await fetch(url, {
@@ -1641,6 +1835,15 @@ function getAdminHTML(
       const score =
         fields.score?.doubleValue || 0;
 
+      const created =
+        fields.created_at?.stringValue || "";
+
+      const reviewedAt =
+        fields.reviewed_at?.stringValue || "-";
+
+      const reviewedBy =
+        fields.reviewed_by?.stringValue || "-";
+
       const applicant =
         fields.applicant?.mapValue?.fields || {};
 
@@ -1650,75 +1853,152 @@ function getAdminHTML(
       const email =
         applicant.email?.stringValue || "No email";
 
-      const created =
-        fields.created_at?.stringValue || "";
+      const details =
+        fields.details?.arrayValue?.values || [];
+
+      const summary =
+        JSON.stringify(details)
+          .substring(0,120);
 
       return `
-      <div class="card">
 
-        <div class="row">
-          <h3>${name}</h3>
+<tr class="application-row">
 
-          <span class="badge ${status}">
-            ${status}
-          </span>
-        </div>
+<td>
+${submissionId}
+</td>
 
-        <p>
-          <b>ID:</b>
-          ${submissionId}
-        </p>
+<td>
+${role}
+</td>
 
-        <p>
-          <b>Role:</b>
-          ${role}
-        </p>
+<td>
 
-        <p>
-          <b>Email:</b>
-          ${email}
-        </p>
+<span
+style="
+padding:6px 12px;
+border-radius:999px;
+font-size:12px;
+font-weight:bold;
+color:white;
+background:${
+  status === "approved"
+    ? "#16a34a"
+    : status === "rejected"
+    ? "#dc2626"
+    : "#ca8a04"
+};
+"
+>
 
-        <p>
-          <b>Score:</b>
-          ${score}
-        </p>
+${status}
 
-        <p>
-          <b>Created:</b>
-          ${created}
-        </p>
+</span>
 
-        <div class="actions">
+</td>
 
-          <a
-            class="approve"
-            href="/review?id=${submissionId}&action=approved&role=${role}&secret=${reviewSecret}"
-          >
-            Approve
-          </a>
+<td>
+${email}
+</td>
 
-          <a
-            class="reject"
-            href="/review?id=${submissionId}&action=rejected&role=${role}&secret=${reviewSecret}"
-          >
-            Reject
-          </a>
+<td>
+${name}
+</td>
 
-        </div>
+<td
+style="
+max-width:300px;
+overflow:hidden;
+text-overflow:ellipsis;
+white-space:nowrap;
+"
+>
+${summary}
+</td>
 
-      </div>
-      `;
+<td>
+${score}
+</td>
+
+<td>
+${created}
+</td>
+
+<td>
+${reviewedAt}
+</td>
+
+<td>
+
+<b>Reviewer:</b>
+${reviewedBy}
+
+<br>
+
+<b>Submission:</b>
+${submissionId}
+
+</td>
+
+<td>
+
+<button
+onclick="
+reviewApplication(
+'${submissionId}',
+'approved',
+'${role}'
+)
+"
+style="
+background:#16a34a;
+color:white;
+padding:8px 14px;
+border:none;
+border-radius:8px;
+cursor:pointer;
+"
+>
+Approve
+</button>
+
+<button
+onclick="
+reviewApplication(
+'${submissionId}',
+'rejected',
+'${role}'
+)
+"
+style="
+background:#dc2626;
+color:white;
+padding:8px 14px;
+border:none;
+border-radius:8px;
+cursor:pointer;
+margin-left:8px;
+"
+>
+Reject
+</button>
+
+</td>
+
+</tr>
+
+`;
     }).join("");
 
   return `
+
 <!DOCTYPE html>
 <html>
 
 <head>
 
 <title>
-PLRAS Admin
+PLRAS Admin Dashboard
 </title>
 
 <style>
@@ -1739,13 +2019,6 @@ h1{
   margin-bottom:20px;
 }
 
-input{
-  padding:12px;
-  width:300px;
-  border-radius:8px;
-  border:1px solid #ddd;
-}
-
 button{
   padding:12px 18px;
   border:none;
@@ -1763,63 +2036,35 @@ button{
   color:white;
 }
 
-.grid{
-  display:grid;
-  gap:16px;
-}
-
-.card{
+table{
+  width:100%;
+  border-collapse:collapse;
   background:white;
-  padding:20px;
-  border-radius:14px;
-  box-shadow:
-    0 2px 8px rgba(0,0,0,0.08);
 }
 
-.row{
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
+th,
+td{
+  border:1px solid #ddd;
+  padding:12px;
+  text-align:left;
+  vertical-align:top;
 }
 
-.badge{
-  padding:6px 10px;
-  border-radius:999px;
+th{
+  background:#111827;
   color:white;
-  font-size:12px;
 }
 
-.pending{
-  background:#f59e0b;
+tr:nth-child(even){
+  background:#f9fafb;
 }
 
-.approved{
-  background:#10b981;
-}
-
-.rejected{
-  background:#ef4444;
-}
-
-.actions{
-  display:flex;
-  gap:10px;
-  margin-top:20px;
-}
-
-.actions a{
-  text-decoration:none;
-  padding:10px 14px;
+.search{
+  width:300px;
+  padding:10px;
+  margin-bottom:20px;
   border-radius:8px;
-  color:white;
-}
-
-.approve{
-  background:#10b981;
-}
-
-.reject{
-  background:#ef4444;
+  border:1px solid #ccc;
 }
 
 </style>
@@ -1832,31 +2077,94 @@ button{
 PLRAS Admin Dashboard 🚀
 </h1>
 
+<input
+id="searchBox"
+class="search"
+placeholder="Search applications..."
+/>
+
 <div class="topbar">
 
 <button
-  class="reload"
-  onclick="location.reload()"
+class="reload"
+onclick="location.reload()"
 >
 Reload
 </button>
 
 <button
-  class="logout"
-  onclick="logout()"
+class="logout"
+onclick="logout()"
 >
 Logout
 </button>
 
 </div>
 
-<div class="grid">
+<table>
 
-${cards || "<p>No applications found</p>"}
+<thead>
 
-</div>
+<tr>
+
+<th>ID</th>
+<th>Role</th>
+<th>Status</th>
+<th>Email</th>
+<th>Name</th>
+<th>Summary</th>
+<th>Score</th>
+<th>Created</th>
+<th>Reviewed</th>
+<th>Audit</th>
+<th>Actions</th>
+
+</tr>
+
+</thead>
+
+<tbody>
+
+${cards || `
+<tr>
+<td colspan="11">
+No applications found
+</td>
+</tr>
+`}
+
+</tbody>
+
+</table>
 
 <script>
+
+document
+.getElementById("searchBox")
+.addEventListener(
+  "input",
+  function(){
+
+    const value =
+      this.value.toLowerCase();
+
+    document
+    .querySelectorAll(
+      ".application-row"
+    )
+    .forEach(row => {
+
+      row.style.display =
+        row.innerText
+          .toLowerCase()
+          .includes(value)
+        ? ""
+        : "none";
+
+    });
+
+  }
+);
 
 async function logout(){
 
@@ -1865,9 +2173,36 @@ async function logout(){
   location.href="/login";
 }
 
+async function reviewApplication(
+  id,
+  action,
+  role
+){
+
+  const res =
+    await fetch(
+      \`/review?id=\${id}&action=\${action}&role=\${role}\`
+    );
+
+  if(res.ok){
+
+    alert(\`✅ \${action}\`);
+
+    location.reload();
+
+  }else{
+
+    alert("Review failed");
+
+  }
+
+}
+
 </script>
 
 </body>
 </html>
+
 `;
 }
+
